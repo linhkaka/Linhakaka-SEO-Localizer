@@ -1,0 +1,8 @@
+{
+  "name": "Linhakaka SEO Localizer 20/8",
+  "description": "Generate localized YouTube metadata (titles, descriptions, tags, hashtags) from video scripts using AI.",
+  "requestFramePermissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
