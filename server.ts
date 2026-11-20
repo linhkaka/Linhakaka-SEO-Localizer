@@ -1413,10 +1413,12 @@ app.all('/api/*', (req, res) => {
   });
 });
 
-async function startServer() {
+function startServer() {
   const isDevMode = Boolean(process.env.NGINX_PORT) || process.env.NODE_ENV === 'development';
   const distPath = path.join(__dirname, 'dist');
   const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
+
+  let viteInstance: { close: () => Promise<void>; middlewares: express.RequestHandler } | null = null;
 
   if (hasBuiltDist && !isDevMode) {
     app.use(express.static(distPath, { index: 'index.html' }));
@@ -1427,17 +1429,74 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   } else {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: true, hmr: false, ws: false },
-      appType: 'spa',
+    let viteMiddleware: express.RequestHandler | null = null;
+    let viteInitError: Error | null = null;
+
+    const viteReadyPromise = (async () => {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true, allowedHosts: true, hmr: false, ws: false },
+        appType: 'spa',
+      });
+      viteInstance = vite;
+      viteMiddleware = vite.middlewares;
+      return vite;
+    })().catch((err) => {
+      viteInitError = err instanceof Error ? err : new Error(String(err));
+      console.error('Failed to initialize Vite middleware:', viteInitError);
+      return null;
     });
-    app.use(vite.middlewares);
+
+    const staticFallback = hasBuiltDist ? express.static(distPath, { index: 'index.html' }) : null;
+
+    app.use(async (req, res, next) => {
+      if (!viteMiddleware && !viteInitError) {
+        await viteReadyPromise;
+      }
+      if (viteMiddleware) {
+        return viteMiddleware(req, res, next);
+      }
+      if (staticFallback) {
+        return staticFallback(req, res, () => {
+          if (req.path.startsWith('/assets/')) {
+            return res.status(404).end();
+          }
+          res.sendFile(path.join(distPath, 'index.html'));
+        });
+      }
+      res.status(503).send('Dev server failed to initialize Vite middleware.');
+    });
   }
 
-  app.listen(port, host, () => {
+  const httpServer = app.listen(port, host, () => {
     console.log(`Server listening on http://${host}:${port}`);
   });
+
+  httpServer.on('error', (err) => {
+    console.error(`Failed to bind server on ${host}:${port}:`, err);
+    process.exit(1);
+  });
+
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}, shutting down gracefully...`);
+    try {
+      if (viteInstance) {
+        await viteInstance.close();
+      }
+    } catch (err) {
+      console.error('Error closing Vite:', err);
+    }
+    httpServer.close(() => {
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
 }
 
 startServer();
